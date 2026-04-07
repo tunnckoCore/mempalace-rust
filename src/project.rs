@@ -82,12 +82,7 @@ pub fn init_project(project_dir: &Path) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    let wing = slugify(
-        project_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("project"),
-    );
+    let wing = slugify(&infer_wing_name(project_dir, "project"));
     let mut room_names = vec!["general".to_string()];
     for entry in fs::read_dir(project_dir)? {
         let entry = entry?;
@@ -124,14 +119,7 @@ pub fn mine_project(
     let wing = wing_override
         .map(|s| s.to_string())
         .or(cfg.wing)
-        .unwrap_or_else(|| {
-            slugify(
-                project_dir
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("project"),
-            )
-        });
+        .unwrap_or_else(|| slugify(&infer_wing_name(project_dir, "project")));
     let files = scan_project(project_dir, limit)?;
     let mut summary = MineSummary {
         wing: wing.clone(),
@@ -406,6 +394,26 @@ fn infer_project_hall(room: &str, content: &str, source_file: &str) -> String {
 
 fn storage_base_dir(_storage: &Storage) -> Result<std::path::PathBuf> {
     crate::config::default_config_dir()
+}
+
+pub(crate) fn infer_wing_name(path: &Path, fallback: &str) -> String {
+    let generic = [
+        "project", "projects", "repo", "repos", "src", "source", "code", "app", "apps", "convos",
+        "chat", "chats",
+    ];
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(fallback);
+    if !generic.contains(&file_name) {
+        return file_name.to_string();
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|s| s.to_str())
+        .filter(|name| !name.is_empty() && !generic.contains(name))
+        .unwrap_or(file_name)
+        .to_string()
 }
 
 fn detect_room(

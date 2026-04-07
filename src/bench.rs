@@ -110,10 +110,9 @@ pub fn run_benchmark(
                 .collect(),
             BenchmarkBackend::Local | BenchmarkBackend::Onnx | BenchmarkBackend::Openai => {
                 let preference = match backend {
-                    BenchmarkBackend::Local | BenchmarkBackend::Openai => {
-                        EmbeddingPreference::StrongLocal
-                    }
+                    BenchmarkBackend::Local => EmbeddingPreference::StrongLocal,
                     BenchmarkBackend::Onnx => EmbeddingPreference::Onnx,
+                    BenchmarkBackend::Openai => EmbeddingPreference::OpenAi,
                     _ => EmbeddingPreference::Auto,
                 };
                 storage.semantic_debug_search(&case.query, preference, k)?

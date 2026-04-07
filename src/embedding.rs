@@ -1,14 +1,19 @@
+use anyhow::{bail, Context, Result};
+use reqwest::blocking::Client;
 use rust_stemmers::{Algorithm, Stemmer};
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::env;
 #[cfg(feature = "onnx-embeddings")]
 use std::sync::OnceLock;
+use std::time::Duration;
 
 pub const EMBED_DIM: usize = 512;
 const MAX_NGRAMS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingBackend {
+    OpenAi,
     OnnxLocal,
     StrongLocal,
     LexicalFallback,
@@ -23,8 +28,32 @@ pub struct EmbeddingResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingPreference {
     Auto,
+    OpenAi,
     StrongLocal,
     Onnx,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiEmbeddingConfig {
+    pub api_key: String,
+    pub model: String,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingRuntimeConfig {
+    pub preference: EmbeddingPreference,
+    pub openai: Option<OpenAiEmbeddingConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingItem {
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingItem>,
 }
 
 pub fn embedding_preference_from_env() -> EmbeddingPreference {
@@ -36,9 +65,75 @@ pub fn embedding_preference_from_env() -> EmbeddingPreference {
 pub fn embedding_preference_from_str(value: &str) -> EmbeddingPreference {
     match value.to_lowercase().as_str() {
         "onnx" | "fastembed" => EmbeddingPreference::Onnx,
-        "local" | "strong_local" | "fallback" | "openai" => EmbeddingPreference::StrongLocal,
+        "openai" => EmbeddingPreference::OpenAi,
+        "local" | "strong_local" | "fallback" => EmbeddingPreference::StrongLocal,
         _ => EmbeddingPreference::Auto,
     }
+}
+
+pub fn runtime_config_from_sources(
+    backend: Option<&str>,
+    openai_model: Option<&str>,
+    openai_api_key: Option<&str>,
+    openai_base_url: Option<&str>,
+) -> EmbeddingRuntimeConfig {
+    let preference = backend
+        .map(embedding_preference_from_str)
+        .unwrap_or_else(embedding_preference_from_env);
+    let api_key = openai_api_key
+        .map(ToString::to_string)
+        .or_else(|| env::var("OPENAI_API_KEY").ok())
+        .or_else(|| env::var("MEMPALACE_OPENAI_API_KEY").ok());
+    let model = openai_model
+        .map(ToString::to_string)
+        .or_else(|| env::var("MEMPALACE_OPENAI_EMBEDDING_MODEL").ok())
+        .unwrap_or_else(|| "text-embedding-3-small".to_string());
+    let base_url = openai_base_url
+        .map(ToString::to_string)
+        .or_else(|| env::var("MEMPALACE_OPENAI_BASE_URL").ok())
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+    EmbeddingRuntimeConfig {
+        preference,
+        openai: api_key.map(|api_key| OpenAiEmbeddingConfig {
+            api_key,
+            model,
+            base_url,
+        }),
+    }
+}
+
+pub fn apply_runtime_config(config: &EmbeddingRuntimeConfig) {
+    env::set_var(
+        "MEMPALACE_EMBEDDING_BACKEND",
+        match config.preference {
+            EmbeddingPreference::Auto => "auto",
+            EmbeddingPreference::OpenAi => "openai",
+            EmbeddingPreference::StrongLocal => "strong_local",
+            EmbeddingPreference::Onnx => "onnx",
+        },
+    );
+    if let Some(openai) = &config.openai {
+        env::set_var("OPENAI_API_KEY", &openai.api_key);
+        env::set_var("MEMPALACE_OPENAI_EMBEDDING_MODEL", &openai.model);
+        env::set_var("MEMPALACE_OPENAI_BASE_URL", &openai.base_url);
+    }
+}
+
+pub fn validate_runtime_config(config: &EmbeddingRuntimeConfig) -> Result<()> {
+    if config.preference == EmbeddingPreference::OpenAi {
+        let openai = config
+            .openai
+            .as_ref()
+            .context("OpenAI backend requested but no API key was configured")?;
+        if openai.model.trim().is_empty() {
+            bail!("OpenAI backend requested but model is empty");
+        }
+        if openai.base_url.trim().is_empty() {
+            bail!("OpenAI backend requested but base URL is empty");
+        }
+    }
+    Ok(())
 }
 
 pub fn embed_text(text: &str) -> EmbeddingResult {
@@ -55,11 +150,16 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
     }
 
     if preference != EmbeddingPreference::StrongLocal {
-        if let Some(vector) = try_real_embedding(text, preference) {
-            return EmbeddingResult {
-                vector,
-                backend: EmbeddingBackend::OnnxLocal,
-            };
+        match try_real_embedding(text, preference) {
+            Ok(Some((vector, backend))) => {
+                return EmbeddingResult { vector, backend };
+            }
+            Ok(None) => {}
+            Err(err) => {
+                if preference == EmbeddingPreference::OpenAi {
+                    panic!("OpenAI embedding backend failed: {err}");
+                }
+            }
         }
     }
 
@@ -229,7 +329,6 @@ fn normalize(vec: &mut [f32]) {
     }
 }
 
-#[cfg(feature = "onnx-embeddings")]
 fn pad_or_truncate(mut vec: Vec<f32>) -> Vec<f32> {
     if vec.len() > EMBED_DIM {
         vec.truncate(EMBED_DIM);
@@ -243,11 +342,52 @@ fn pad_or_truncate(mut vec: Vec<f32>) -> Vec<f32> {
     vec
 }
 
-#[cfg(feature = "onnx-embeddings")]
-fn try_real_embedding(text: &str, preference: EmbeddingPreference) -> Option<Vec<f32>> {
+fn try_real_embedding(
+    text: &str,
+    preference: EmbeddingPreference,
+) -> Result<Option<(Vec<f32>, EmbeddingBackend)>> {
     if preference == EmbeddingPreference::StrongLocal {
-        return None;
+        return Ok(None);
     }
+    if matches!(
+        preference,
+        EmbeddingPreference::Auto | EmbeddingPreference::OpenAi
+    ) {
+        match try_openai_embedding(text) {
+            Ok(Some(vector)) => return Ok(Some((vector, EmbeddingBackend::OpenAi))),
+            Ok(None) => {
+                if preference == EmbeddingPreference::OpenAi {
+                    bail!(
+                        "OpenAI embedding backend requested but OPENAI_API_KEY is not configured"
+                    );
+                }
+            }
+            Err(err) => {
+                if preference == EmbeddingPreference::OpenAi {
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "onnx-embeddings")]
+    {
+        if preference != EmbeddingPreference::OpenAi {
+            if let Some(vector) = try_onnx_embedding(text) {
+                return Ok(Some((vector, EmbeddingBackend::OnnxLocal)));
+            }
+        }
+    }
+
+    if preference == EmbeddingPreference::OpenAi {
+        bail!("OpenAI embedding backend requested but no OpenAI vector could be produced");
+    }
+
+    Ok(None)
+}
+
+#[cfg(feature = "onnx-embeddings")]
+fn try_onnx_embedding(text: &str) -> Option<Vec<f32>> {
     static MODEL: OnceLock<Option<fastembed::TextEmbedding>> = OnceLock::new();
     let model = MODEL.get_or_init(|| {
         let cache_dir = env::var("MEMPALACE_EMBEDDING_MODEL_DIR").ok();
@@ -262,7 +402,48 @@ fn try_real_embedding(text: &str, preference: EmbeddingPreference) -> Option<Vec
     vectors.into_iter().next().map(pad_or_truncate)
 }
 
-#[cfg(not(feature = "onnx-embeddings"))]
-fn try_real_embedding(_text: &str, _preference: EmbeddingPreference) -> Option<Vec<f32>> {
-    None
+fn try_openai_embedding(text: &str) -> Result<Option<Vec<f32>>> {
+    let api_key = env::var("OPENAI_API_KEY")
+        .ok()
+        .or_else(|| env::var("MEMPALACE_OPENAI_API_KEY").ok());
+    let Some(api_key) = api_key else {
+        return Ok(None);
+    };
+    let model = env::var("MEMPALACE_OPENAI_EMBEDDING_MODEL")
+        .unwrap_or_else(|_| "text-embedding-3-small".to_string());
+    let base_url = env::var("MEMPALACE_OPENAI_BASE_URL")
+        .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    let endpoint = format!("{}/embeddings", base_url.trim_end_matches('/'));
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .context("building OpenAI embedding client")?;
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "input": text,
+            "model": model,
+        }))
+        .send()
+        .context("sending OpenAI embedding request")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        bail!(
+            "OpenAI embedding request failed with status {}: {}",
+            status,
+            body
+        );
+    }
+    let parsed: OpenAiEmbeddingResponse = response
+        .json()
+        .context("parsing OpenAI embedding response")?;
+    let vector = parsed
+        .data
+        .into_iter()
+        .next()
+        .map(|item| pad_or_truncate(item.embedding))
+        .context("OpenAI embedding response did not include data")?;
+    Ok(Some(vector))
 }

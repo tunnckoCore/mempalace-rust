@@ -18,6 +18,10 @@ pub struct FileConfig {
     pub people_map: HashMap<String, String>,
     #[serde(default)]
     pub embedding_backend: Option<String>,
+    #[serde(default)]
+    pub openai_embedding_model: Option<String>,
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +33,8 @@ pub struct AppConfig {
     pub collection_name: String,
     pub people_map: HashMap<String, String>,
     pub embedding_backend: String,
+    pub openai_embedding_model: String,
+    pub openai_base_url: String,
 }
 
 impl AppConfig {
@@ -45,6 +51,8 @@ impl AppConfig {
                 collection_name: None,
                 people_map: HashMap::new(),
                 embedding_backend: None,
+                openai_embedding_model: None,
+                openai_base_url: None,
             })
         } else {
             FileConfig {
@@ -52,6 +60,8 @@ impl AppConfig {
                 collection_name: None,
                 people_map: HashMap::new(),
                 embedding_backend: None,
+                openai_embedding_model: None,
+                openai_base_url: None,
             }
         };
 
@@ -80,6 +90,14 @@ impl AppConfig {
                 .ok()
                 .or(file_cfg.embedding_backend)
                 .unwrap_or_else(|| "auto".to_string()),
+            openai_embedding_model: env::var("MEMPALACE_OPENAI_EMBEDDING_MODEL")
+                .ok()
+                .or(file_cfg.openai_embedding_model)
+                .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+            openai_base_url: env::var("MEMPALACE_OPENAI_BASE_URL")
+                .ok()
+                .or(file_cfg.openai_base_url)
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
         })
     }
 
@@ -92,6 +110,8 @@ impl AppConfig {
                 collection_name: Some(self.collection_name.clone()),
                 people_map: self.people_map.clone(),
                 embedding_backend: Some(self.embedding_backend.clone()),
+                openai_embedding_model: Some(self.openai_embedding_model.clone()),
+                openai_base_url: Some(self.openai_base_url.clone()),
             })?;
             fs::write(&self.config_file, body)
                 .with_context(|| format!("writing {}", self.config_file.display()))?;

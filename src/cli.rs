@@ -2,6 +2,9 @@ use crate::bench::{backend_help, load_dataset, run_benchmark, BenchmarkBackend};
 use crate::compression::maintain_compressed_artifacts;
 use crate::config::AppConfig;
 use crate::convo;
+use crate::embedding::{
+    apply_runtime_config, runtime_config_from_sources, validate_runtime_config,
+};
 use crate::mcp;
 use crate::project;
 use crate::storage::Storage;
@@ -21,6 +24,12 @@ struct Cli {
     palace: Option<PathBuf>,
     #[arg(long)]
     embedding_backend: Option<String>,
+    #[arg(long)]
+    openai_embedding_model: Option<String>,
+    #[arg(long)]
+    openai_api_key: Option<String>,
+    #[arg(long)]
+    openai_base_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -108,12 +117,23 @@ struct BenchmarkArgs {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut config = AppConfig::load(cli.palace.as_deref())?;
-    if let Some(backend) = cli.embedding_backend {
+    if let Some(backend) = cli.embedding_backend.clone() {
         config.embedding_backend = backend;
-        std::env::set_var("MEMPALACE_EMBEDDING_BACKEND", &config.embedding_backend);
-    } else {
-        std::env::set_var("MEMPALACE_EMBEDDING_BACKEND", &config.embedding_backend);
     }
+    if let Some(model) = cli.openai_embedding_model.clone() {
+        config.openai_embedding_model = model;
+    }
+    if let Some(base_url) = cli.openai_base_url.clone() {
+        config.openai_base_url = base_url;
+    }
+    let runtime_config = runtime_config_from_sources(
+        Some(&config.embedding_backend),
+        Some(&config.openai_embedding_model),
+        cli.openai_api_key.as_deref(),
+        Some(&config.openai_base_url),
+    );
+    validate_runtime_config(&runtime_config)?;
+    apply_runtime_config(&runtime_config);
     match cli.command {
         Commands::Init(args) => {
             config.init_files()?;
@@ -127,6 +147,8 @@ pub fn run() -> Result<()> {
             println!("global config: {}", config.config_file.display());
             println!("palace path: {}", config.palace_path.display());
             println!("embedding backend: {}", config.embedding_backend);
+            println!("openai embedding model: {}", config.openai_embedding_model);
+            println!("openai base url: {}", config.openai_base_url);
         }
         Commands::Mine(args) => {
             let mut storage = Storage::open(&config.palace_path)?;

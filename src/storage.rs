@@ -562,6 +562,7 @@ impl Storage {
                 + named_entityish_boost(query, &content_preview) * 0.3)
                 as f64;
             hit.embedding_backend = match query_embedding.backend {
+                EmbeddingBackend::OpenAi => "openai".to_string(),
                 EmbeddingBackend::OnnxLocal => "onnx_local".to_string(),
                 EmbeddingBackend::StrongLocal => "strong_local".to_string(),
                 EmbeddingBackend::LexicalFallback => "lexical_fallback".to_string(),
@@ -612,6 +613,7 @@ impl Storage {
                     + named_entityish_boost(query, &content_preview) * 0.3)
                     as f64;
                 hit.embedding_backend = match query_embedding.backend {
+                    EmbeddingBackend::OpenAi => "openai".to_string(),
                     EmbeddingBackend::OnnxLocal => "onnx_local".to_string(),
                     EmbeddingBackend::StrongLocal => "strong_local".to_string(),
                     EmbeddingBackend::LexicalFallback => "lexical_fallback".to_string(),

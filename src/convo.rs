@@ -46,14 +46,9 @@ pub fn mine_conversations(
     dry_run: bool,
     extract_mode: &str,
 ) -> Result<MineSummary> {
-    let wing = wing_override.map(|s| s.to_string()).unwrap_or_else(|| {
-        slugify(
-            convo_dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("convos"),
-        )
-    });
+    let wing = wing_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| slugify(&crate::project::infer_wing_name(convo_dir, "convos")));
     let files = scan_convos(convo_dir, limit)?;
     let mut summary = MineSummary {
         wing: wing.clone(),

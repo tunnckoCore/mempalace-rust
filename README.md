@@ -29,6 +29,7 @@ Embedding backends:
 
 - **default / fallback path**: strong local in-process vectorizer (stemming + weighted n-grams + signed feature hashing)
 - **optional real backend**: ONNX/local model embedding via `fastembed` behind the `onnx-embeddings` Cargo feature
+- **optional OpenAI backend**: live OpenAI embeddings over HTTPS using `OPENAI_API_KEY`
 
 This keeps SQLite as source of truth while allowing a stronger semantic backend when enabled.
 
@@ -139,15 +140,30 @@ The tool inventory includes:
 
 Runtime/backend selection is controlled by:
 
-- CLI: `--embedding-backend auto|strong_local|onnx`
-- env: `MEMPALACE_EMBEDDING_BACKEND`
-- config: `~/.mempalace/config.json` → `embedding_backend`
+- CLI: `--embedding-backend auto|strong_local|onnx|openai`, `--openai-embedding-model`, `--openai-api-key`, `--openai-base-url`
+- env: `MEMPALACE_EMBEDDING_BACKEND`, `OPENAI_API_KEY`, `MEMPALACE_OPENAI_EMBEDDING_MODEL`, `MEMPALACE_OPENAI_BASE_URL`
+- config: `~/.mempalace/config.json` → `embedding_backend`, `openai_embedding_model`, `openai_base_url`
 
 Behavior:
 
-- `auto` (default): try ONNX backend if compiled and available, otherwise fall back cleanly
+- `auto` (default): try OpenAI first when configured, then ONNX if compiled and available, otherwise fall back cleanly
+- `openai`: require OpenAI embeddings; missing key/model or request failures are surfaced clearly
 - `onnx`: prefer ONNX backend, but still fall back if model/backend initialization fails at runtime
 - `strong_local`: force the built-in local vectorizer
+
+Precedence:
+- CLI flags
+- environment variables
+- config file
+- defaults
+
+OpenAI examples:
+
+```bash
+export OPENAI_API_KEY=sk-...
+cargo run -- search "why did we switch to GraphQL" --embedding-backend openai
+cargo run -- benchmark ./bench.json --backend openai --openai-embedding-model text-embedding-3-small
+```
 
 Optional ONNX build:
 
@@ -211,6 +227,7 @@ Backends:
 - `fts`
 - `local`
 - `onnx`
+- `openai`
 - `hybrid`
 
 ## What is now implemented
@@ -247,7 +264,7 @@ Backends:
 
 ### Mining / refresh caveats
 
-- Some refresh plumbing currently uses a pragmatic owned-string-to-static-reference approach during planning; this should be cleaned up in a later compile-verified pass.
+- Runtime ingestion/compression/benchmark refresh paths now use owned refresh plans instead of `Box::leak`-driven planning.
 
 ## File layout
 
