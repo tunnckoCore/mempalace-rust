@@ -1,7 +1,7 @@
 use crate::dialect::{CompressionStats, Dialect};
-use crate::storage::{Drawer, DrawerInput, SourceRefreshPlan, Storage};
+use crate::storage::{Drawer, Storage};
+use crate::storage_types::{DrawerInputOwned, SourceRefreshPlanOwned};
 use anyhow::Result;
-use md5;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -80,25 +80,25 @@ pub fn maintain_compressed_artifacts(
         if storage.source_is_current(&artifact.source_file, &source_hash)? {
             continue;
         }
-        let planned = vec![DrawerInput {
-            id: Box::leak(artifact.id.into_boxed_str()),
-            wing: Box::leak(drawer.wing.clone().into_boxed_str()),
-            room: Box::leak(drawer.room.clone().into_boxed_str()),
-            source_file: Box::leak(artifact.source_file.into_boxed_str()),
+        let planned = vec![DrawerInputOwned {
+            id: artifact.id,
+            wing: drawer.wing.clone(),
+            room: drawer.room.clone(),
+            source_file: artifact.source_file.clone(),
             chunk_index: drawer.chunk_index,
-            added_by: "compress",
-            content: Box::leak(artifact.content.into_boxed_str()),
-            hall: artifact.hall.as_deref(),
-            date: artifact.date.as_deref(),
-            drawer_type: "compressed",
-            source_hash: Some(Box::leak(source_hash.clone().into_boxed_str())),
+            added_by: "compress".to_string(),
+            content: artifact.content,
+            hall: artifact.hall,
+            date: artifact.date,
+            drawer_type: "compressed".to_string(),
+            source_hash: Some(source_hash.clone()),
             importance: artifact.importance,
             emotional_weight: None,
             weight: artifact.weight,
         }];
-        artifacts_written += storage.refresh_source(SourceRefreshPlan {
-            source_file: planned[0].source_file,
-            source_hash: planned[0].source_hash.unwrap_or_default(),
+        artifacts_written += storage.refresh_source_owned(SourceRefreshPlanOwned {
+            source_file: artifact.source_file,
+            source_hash,
             drawers: planned,
         })?;
     }

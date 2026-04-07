@@ -175,7 +175,43 @@ cargo run -- status
 cargo run -- wake-up
 cargo run -- compress --wing myapp
 cargo run -- mcp --transport stdio
+cargo run -- benchmark ./bench.json --backend hybrid --k 5
 ```
+
+## Benchmark runner
+
+A benchmark/eval runner is included via the `benchmark` CLI command.
+
+Supported dataset formats:
+
+JSON:
+```json
+{
+  "documents": [
+    {"id": "doc1", "wing": "app", "room": "architecture", "content": "...", "source_file": "bench/doc1.md"}
+  ],
+  "queries": [
+    {"id": "q1", "query": "typed GraphQL queries", "relevant_ids": ["doc1"]}
+  ]
+}
+```
+
+JSONL:
+```json
+{"kind":"document","id":"doc1","wing":"app","room":"architecture","content":"..."}
+{"kind":"query","id":"q1","query":"typed GraphQL queries","relevant_ids":["doc1"]}
+```
+
+Output metrics:
+- Recall@k
+- MRR
+- NDCG@k
+
+Backends:
+- `fts`
+- `local`
+- `onnx`
+- `hybrid`
 
 ## What is now implemented
 

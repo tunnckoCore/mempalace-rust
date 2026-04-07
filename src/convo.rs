@@ -1,10 +1,11 @@
 use crate::artifacts::{derive_convo_artifacts, extract_kg_candidates, infer_date};
 use crate::extractor::extract_memories;
 use crate::kg::KnowledgeGraph;
+use crate::limits::{MAX_INGEST_CHARS, MAX_INGEST_FILE_BYTES};
 use crate::search::slugify;
-use crate::storage::{DrawerInput, Storage};
+use crate::storage::Storage;
+use crate::storage_types::{DrawerInputOwned, SourceRefreshPlanOwned};
 use anyhow::Result;
-use md5;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -66,10 +67,22 @@ pub fn mine_conversations(
 
     for file in files {
         let source_file = file.to_string_lossy().to_string();
+        let metadata = match fs::metadata(&file) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > MAX_INGEST_FILE_BYTES {
+            summary.files_skipped += 1;
+            continue;
+        }
         let content = match normalize(&file) {
             Ok(text) => text,
             Err(_) => continue,
         };
+        if content.chars().count() > MAX_INGEST_CHARS {
+            summary.files_skipped += 1;
+            continue;
+        }
         let source_hash = format!("{:x}", md5::compute(content.as_bytes()));
         if !dry_run && storage.source_is_current(&source_file, &source_hash)? {
             summary.files_skipped += 1;
@@ -79,7 +92,7 @@ pub fn mine_conversations(
             continue;
         }
         let inferred_date = infer_date(&content, Some(&source_file));
-        let mut planned = Vec::new();
+        let mut planned: Vec<DrawerInputOwned> = Vec::new();
         if extract_mode == "general" {
             let memories = extract_memories(&content, 0.3);
             if memories.is_empty() {
@@ -97,18 +110,18 @@ pub fn mine_conversations(
                 );
                 let drawer_id = format!("drawer_{}_{}_{}", wing, room, &digest[..16]);
                 let hall = infer_convo_hall(&room, &memory.content, &source_file, true);
-                planned.push(DrawerInput {
-                    id: Box::leak(drawer_id.into_boxed_str()),
-                    wing: Box::leak(wing.clone().into_boxed_str()),
-                    room: Box::leak(room.into_boxed_str()),
-                    source_file: Box::leak(source_file.clone().into_boxed_str()),
+                planned.push(DrawerInputOwned {
+                    id: drawer_id,
+                    wing: wing.clone(),
+                    room,
+                    source_file: source_file.clone(),
                     chunk_index: idx as i64,
-                    added_by: Box::leak(agent.to_string().into_boxed_str()),
-                    content: Box::leak(memory.content.clone().into_boxed_str()),
-                    hall: Some(Box::leak(hall.into_boxed_str())),
-                    date: inferred_date.as_deref(),
-                    drawer_type: "derived_memory",
-                    source_hash: Some(Box::leak(source_hash.clone().into_boxed_str())),
+                    added_by: agent.to_string(),
+                    content: memory.content.clone(),
+                    hall: Some(hall),
+                    date: inferred_date.clone(),
+                    drawer_type: "derived_memory".to_string(),
+                    source_hash: Some(source_hash.clone()),
                     importance: None,
                     emotional_weight: None,
                     weight: None,
@@ -131,18 +144,18 @@ pub fn mine_conversations(
                 );
                 let drawer_id = format!("drawer_{}_{}_{}", wing, room, &digest[..16]);
                 let hall = infer_convo_hall(&room, chunk, &source_file, false);
-                planned.push(DrawerInput {
-                    id: Box::leak(drawer_id.into_boxed_str()),
-                    wing: Box::leak(wing.clone().into_boxed_str()),
-                    room: Box::leak(room.into_boxed_str()),
-                    source_file: Box::leak(source_file.clone().into_boxed_str()),
+                planned.push(DrawerInputOwned {
+                    id: drawer_id,
+                    wing: wing.clone(),
+                    room,
+                    source_file: source_file.clone(),
                     chunk_index: idx as i64,
-                    added_by: Box::leak(agent.to_string().into_boxed_str()),
-                    content: Box::leak(chunk.clone().into_boxed_str()),
-                    hall: Some(Box::leak(hall.into_boxed_str())),
-                    date: inferred_date.as_deref(),
-                    drawer_type: "drawer",
-                    source_hash: Some(Box::leak(source_hash.clone().into_boxed_str())),
+                    added_by: agent.to_string(),
+                    content: chunk.clone(),
+                    hall: Some(hall),
+                    date: inferred_date.clone(),
+                    drawer_type: "drawer".to_string(),
+                    source_hash: Some(source_hash.clone()),
                     importance: None,
                     emotional_weight: None,
                     weight: None,
@@ -166,18 +179,18 @@ pub fn mine_conversations(
             let artifact_hall = artifact.hall;
             let artifact_date = artifact.date;
             let artifact_type = artifact.drawer_type;
-            planned.push(DrawerInput {
-                id: Box::leak(artifact_id.into_boxed_str()),
-                wing: Box::leak(wing.clone().into_boxed_str()),
-                room: Box::leak(artifact_room.into_boxed_str()),
-                source_file: Box::leak(source_file.clone().into_boxed_str()),
+            planned.push(DrawerInputOwned {
+                id: artifact_id,
+                wing: wing.clone(),
+                room: artifact_room,
+                source_file: source_file.clone(),
                 chunk_index: (10_000 + idx) as i64,
-                added_by: Box::leak(agent.to_string().into_boxed_str()),
-                content: Box::leak(artifact_content.into_boxed_str()),
-                hall: Some(Box::leak(artifact_hall.into_boxed_str())),
-                date: artifact_date.map(|d| Box::leak(d.into_boxed_str()) as &str),
-                drawer_type: Box::leak(artifact_type.into_boxed_str()),
-                source_hash: Some(Box::leak(source_hash.clone().into_boxed_str())),
+                added_by: agent.to_string(),
+                content: artifact_content,
+                hall: Some(artifact_hall),
+                date: artifact_date,
+                drawer_type: artifact_type,
+                source_hash: Some(source_hash.clone()),
                 importance: artifact.importance,
                 emotional_weight: None,
                 weight: artifact.weight,
@@ -200,9 +213,9 @@ pub fn mine_conversations(
         }
 
         if !dry_run {
-            summary.drawers_added += storage.refresh_source(crate::storage::SourceRefreshPlan {
-                source_file: Box::leak(source_file.clone().into_boxed_str()),
-                source_hash: Box::leak(source_hash.clone().into_boxed_str()),
+            summary.drawers_added += storage.refresh_source_owned(SourceRefreshPlanOwned {
+                source_file: source_file.clone(),
+                source_hash: source_hash.clone(),
                 drawers: planned,
             })?;
         }

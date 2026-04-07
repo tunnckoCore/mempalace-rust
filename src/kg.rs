@@ -56,6 +56,7 @@ impl KnowledgeGraph {
         Ok(Self { conn })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_triple(
         &self,
         subject: &str,
@@ -78,12 +79,18 @@ impl KnowledgeGraph {
             "INSERT OR IGNORE INTO entities (id, name) VALUES (?1, ?2)",
             params![obj_id, object],
         )?;
-        if let Some(existing) = self.conn.query_row(
-            "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL LIMIT 1",
+        if let Some((existing_id, existing_confidence)) = self.conn.query_row(
+            "SELECT id, confidence FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_to IS NULL LIMIT 1",
             params![sub_id, pred, obj_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
         ).optional()? {
-            return Ok(existing);
+            if confidence > existing_confidence {
+                self.conn.execute(
+                    "UPDATE triples SET confidence=?2, source_closet=COALESCE(?3, source_closet), source_file=COALESCE(?4, source_file) WHERE id=?1",
+                    params![existing_id, confidence, source_closet, source_file],
+                )?;
+            }
+            return Ok(existing_id);
         }
         let triple_id = format!(
             "t_{}_{}_{}_{}",

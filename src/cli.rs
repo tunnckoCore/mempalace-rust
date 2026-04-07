@@ -1,3 +1,4 @@
+use crate::bench::{backend_help, load_dataset, run_benchmark, BenchmarkBackend};
 use crate::compression::maintain_compressed_artifacts;
 use crate::config::AppConfig;
 use crate::convo;
@@ -33,6 +34,7 @@ enum Commands {
     WakeUp(WakeUpArgs),
     Compress(CompressArgs),
     Mcp(McpArgs),
+    Benchmark(BenchmarkArgs),
 }
 
 #[derive(Args)]
@@ -92,6 +94,15 @@ struct CompressArgs {
 struct McpArgs {
     #[arg(long, default_value = "stdio")]
     transport: String,
+}
+
+#[derive(Args)]
+struct BenchmarkArgs {
+    dataset: PathBuf,
+    #[arg(long, value_enum, default_value = "hybrid")]
+    backend: BenchmarkBackend,
+    #[arg(long, default_value_t = 5)]
+    k: usize,
 }
 
 pub fn run() -> Result<()> {
@@ -219,6 +230,13 @@ pub fn run() -> Result<()> {
                 anyhow::bail!("only --transport stdio is supported currently");
             }
             mcp::run_stdio_server(&config)?;
+        }
+        Commands::Benchmark(args) => {
+            let mut storage = Storage::open(&config.palace_path)?;
+            let dataset = load_dataset(&args.dataset)?;
+            let result = run_benchmark(&mut storage, &dataset, args.backend, args.k)?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            println!("{}", backend_help());
         }
     }
     Ok(())

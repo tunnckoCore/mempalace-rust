@@ -1,8 +1,10 @@
 use crate::embedding::{
-    cosine_similarity, decode_vector, embed_text, encode_vector, named_entityish_boost,
-    phrase_overlap_score, EmbeddingBackend,
+    cosine_similarity, decode_vector, embed_text, embed_text_with_preference, encode_vector,
+    named_entityish_boost, phrase_overlap_score, EmbeddingBackend, EmbeddingPreference,
 };
+use crate::limits::MAX_QUERY_CHARS;
 use crate::search::normalize_query_for_fts;
+use crate::storage_types::SourceRefreshPlanOwned;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -198,6 +200,38 @@ impl Storage {
         Ok(inserted)
     }
 
+    pub fn refresh_source_owned(&mut self, plan: SourceRefreshPlanOwned) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let mut inserted = 0usize;
+        for input in &plan.drawers {
+            let changed = tx.execute(
+                "INSERT OR REPLACE INTO drawers(id, wing, room, source_file, chunk_index, added_by, filed_at, content, hall, date, drawer_type, source_hash, active, importance, emotional_weight, weight)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?15)",
+                params![input.id, input.wing, input.room, input.source_file, input.chunk_index, input.added_by, now, input.content, input.hall, input.date, input.drawer_type, input.source_hash, input.importance, input.emotional_weight, input.weight],
+            )?;
+            let embedding = encode_vector(&embed_text(&input.content).vector);
+            tx.execute(
+                "INSERT OR REPLACE INTO vectors(drawer_id, embedding) VALUES (?1, ?2)",
+                params![input.id, embedding],
+            )?;
+            if changed > 0 {
+                inserted += 1;
+            }
+        }
+        tx.execute(
+            "UPDATE drawers SET active = 0 WHERE source_file = ?1 AND source_hash IS NOT ?2",
+            params![plan.source_file, plan.source_hash],
+        )?;
+        tx.execute(
+            "INSERT INTO source_revisions(source_file, source_hash, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(source_file) DO UPDATE SET source_hash=excluded.source_hash, updated_at=excluded.updated_at",
+            params![plan.source_file, plan.source_hash, now],
+        )?;
+        tx.commit()?;
+        Ok(inserted)
+    }
+
     pub fn add_drawer(&self, input: DrawerInput<'_>) -> Result<bool> {
         let filed_at = Utc::now().to_rfc3339();
         let changed = self.conn.execute(
@@ -296,8 +330,31 @@ impl Storage {
         room: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let lexical = self.lexical_search(query, wing, room, limit.saturating_mul(5).max(20))?;
-        let semantic = self.semantic_search(query, wing, room, limit.saturating_mul(5).max(20))?;
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let capped_limit = limit.min(50);
+        let lexical =
+            self.lexical_search(query, wing, room, capped_limit.saturating_mul(5).max(20))?;
+        let candidate_ids = if lexical.is_empty() {
+            None
+        } else {
+            Some(
+                lexical
+                    .iter()
+                    .take(200)
+                    .map(|hit| hit.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let semantic = self.semantic_search(
+            query,
+            wing,
+            room,
+            capped_limit.saturating_mul(5).max(20),
+            candidate_ids.as_deref(),
+        )?;
         let mut merged: HashMap<String, SearchHit> = HashMap::new();
 
         for (rank, hit) in lexical.into_iter().enumerate() {
@@ -335,8 +392,47 @@ impl Storage {
                 .partial_cmp(&a.fused_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        values.truncate(limit);
+        values.truncate(capped_limit);
         Ok(values)
+    }
+
+    pub fn lexical_debug_search(&self, query: &str, limit: usize) -> Result<Vec<String>> {
+        Ok(self
+            .lexical_search(query, None, None, limit)?
+            .into_iter()
+            .map(|hit| hit.id)
+            .collect())
+    }
+
+    pub fn semantic_debug_search(
+        &self,
+        query: &str,
+        preference: EmbeddingPreference,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let query_embedding = embed_text_with_preference(query, preference);
+        let query_vec = query_embedding.vector.clone();
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, v.embedding, d.content FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut scored = Vec::new();
+        for row in rows {
+            let (id, embedding_bytes, content) = row?;
+            let embedding = decode_vector(&embedding_bytes);
+            let semantic = cosine_similarity(&query_vec, &embedding) as f64;
+            let heuristic = (phrase_overlap_score(query, &content) * 0.7
+                + named_entityish_boost(query, &content) * 0.3) as f64;
+            scored.push((id, semantic * 0.75 + heuristic * 0.25));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored.into_iter().take(limit).map(|(id, _)| id).collect())
     }
 
     fn lexical_search(
@@ -430,21 +526,32 @@ impl Storage {
         wing: Option<&str>,
         room: Option<&str>,
         limit: usize,
+        candidate_ids: Option<&[String]>,
     ) -> Result<Vec<SearchHit>> {
+        if let Some(candidate_ids) = candidate_ids {
+            return self.semantic_search_candidates(query, limit, candidate_ids);
+        }
         let query_embedding = embed_text(query);
         let query_vec = query_embedding.vector.clone();
+        let sql_limit = if query.chars().count() > MAX_QUERY_CHARS / 2 {
+            2_000
+        } else {
+            10_000
+        };
         let sql = match (wing, room) {
-            (Some(_), Some(_)) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.wing = ?1 AND d.room = ?2",
-            (Some(_), None) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.wing = ?1",
-            (None, Some(_)) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.room = ?1",
-            (None, None) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1",
+            (Some(_), Some(_)) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.wing = ?1 AND d.room = ?2 LIMIT ?3",
+            (Some(_), None) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.wing = ?1 LIMIT ?2",
+            (None, Some(_)) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.room = ?1 LIMIT ?2",
+            (None, None) => "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 LIMIT ?1",
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = match (wing, room) {
-            (Some(wing), Some(room)) => stmt.query_map(params![wing, room], map_semantic_row)?,
-            (Some(wing), None) => stmt.query_map(params![wing], map_semantic_row)?,
-            (None, Some(room)) => stmt.query_map(params![room], map_semantic_row)?,
-            (None, None) => stmt.query_map([], map_semantic_row)?,
+            (Some(wing), Some(room)) => {
+                stmt.query_map(params![wing, room, sql_limit], map_semantic_row)?
+            }
+            (Some(wing), None) => stmt.query_map(params![wing, sql_limit], map_semantic_row)?,
+            (None, Some(room)) => stmt.query_map(params![room, sql_limit], map_semantic_row)?,
+            (None, None) => stmt.query_map(params![sql_limit], map_semantic_row)?,
         };
         let mut hits = Vec::new();
         for row in rows {
@@ -480,6 +587,47 @@ impl Storage {
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         self.search_hybrid(query, wing, room, limit)
+    }
+
+    fn semantic_search_candidates(
+        &self,
+        query: &str,
+        limit: usize,
+        candidate_ids: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        let query_embedding = embed_text(query);
+        let query_vec = query_embedding.vector.clone();
+        let mut hits = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT d.id, d.wing, d.room, d.source_file, d.chunk_index, d.added_by, d.filed_at, substr(d.content, 1, 300), d.drawer_type, v.embedding FROM drawers d JOIN vectors v ON v.drawer_id = d.id WHERE d.active = 1 AND d.id = ?1"
+        )?;
+        for candidate_id in candidate_ids.iter().take(200) {
+            if let Some((mut hit, embedding_bytes, content_preview)) = stmt
+                .query_row([candidate_id], map_semantic_row)
+                .optional()?
+            {
+                let embedding = decode_vector(&embedding_bytes);
+                hit.semantic_score = cosine_similarity(&query_vec, &embedding) as f64;
+                hit.heuristic_score = (phrase_overlap_score(query, &content_preview) * 0.7
+                    + named_entityish_boost(query, &content_preview) * 0.3)
+                    as f64;
+                hit.embedding_backend = match query_embedding.backend {
+                    EmbeddingBackend::OnnxLocal => "onnx_local".to_string(),
+                    EmbeddingBackend::StrongLocal => "strong_local".to_string(),
+                    EmbeddingBackend::LexicalFallback => "lexical_fallback".to_string(),
+                };
+                hits.push(hit);
+            }
+        }
+        hits.sort_by(|a, b| {
+            let score_a = a.semantic_score * 0.75 + a.heuristic_score * 0.25;
+            let score_b = b.semantic_score * 0.75 + b.heuristic_score * 0.25;
+            score_b
+                .partial_cmp(&score_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        hits.truncate(limit);
+        Ok(hits)
     }
 
     pub fn taxonomy(&self) -> Result<serde_json::Value> {

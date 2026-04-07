@@ -3,6 +3,15 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+type RoomAggregate = (
+    BTreeSet<String>,
+    BTreeSet<String>,
+    usize,
+    BTreeSet<String>,
+    BTreeSet<String>,
+    BTreeMap<String, BTreeSet<String>>,
+);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphNode {
     pub wings: Vec<String>,
@@ -17,17 +26,7 @@ pub fn build_graph(
     storage: &Storage,
 ) -> Result<(BTreeMap<String, GraphNode>, Vec<serde_json::Value>)> {
     let drawers = storage.all_drawers()?;
-    let mut room_data: BTreeMap<
-        String,
-        (
-            BTreeSet<String>,
-            BTreeSet<String>,
-            usize,
-            BTreeSet<String>,
-            BTreeSet<String>,
-            BTreeMap<String, BTreeSet<String>>,
-        ),
-    > = BTreeMap::new();
+    let mut room_data: BTreeMap<String, RoomAggregate> = BTreeMap::new();
     for drawer in drawers {
         if drawer.room.is_empty() || drawer.room == "general" || drawer.wing.is_empty() {
             continue;

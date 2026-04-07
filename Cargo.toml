@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = []
 onnx-embeddings = ["dep:fastembed"]
+openai-embeddings = []
 
 [dependencies]
 anyhow = "1"
@@ -30,6 +31,7 @@ serde_yaml = "0.9"
 thiserror = "1"
 walkdir = "2"
 fastembed = { version = "4", optional = true, default-features = false }
+
 
 [dev-dependencies]
 tempfile = "3"

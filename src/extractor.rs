@@ -204,7 +204,7 @@ fn split_by_turns(lines: &[&str], turn_patterns: &[Regex]) -> Vec<String> {
 }
 
 fn extract_prose(text: &str) -> String {
-    let code_patterns = vec![
+    let code_patterns = [
         Regex::new(r"^\s*[\$#]\s").unwrap(),
         Regex::new(r"^\s*(cd|source|echo|export|pip|npm|git|python|bash|curl|wget|mkdir|rm|cp|mv|ls|cat|grep|find|chmod|sudo|brew|docker)\s").unwrap(),
         Regex::new(r"^\s*```").unwrap(),
@@ -275,12 +275,10 @@ fn disambiguate(memory_type: &str, text: &str, scores: &HashMap<&str, f32>) -> S
         .collect();
     let pos = positive.iter().filter(|w| words.contains(**w)).count();
     let neg = negative.iter().filter(|w| words.contains(**w)).count();
-    let sentiment = if pos > neg {
-        "positive"
-    } else if neg > pos {
-        "negative"
-    } else {
-        "neutral"
+    let sentiment = match pos.cmp(&neg) {
+        std::cmp::Ordering::Greater => "positive",
+        std::cmp::Ordering::Less => "negative",
+        std::cmp::Ordering::Equal => "neutral",
     };
     let has_resolution = [
         "fixed",

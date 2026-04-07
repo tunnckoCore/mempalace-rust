@@ -1,6 +1,8 @@
 use rust_stemmers::{Algorithm, Stemmer};
 use std::collections::{HashMap, HashSet};
 use std::env;
+#[cfg(feature = "onnx-embeddings")]
+use std::sync::OnceLock;
 
 pub const EMBED_DIM: usize = 512;
 const MAX_NGRAMS: usize = 3;
@@ -26,13 +28,15 @@ pub enum EmbeddingPreference {
 }
 
 pub fn embedding_preference_from_env() -> EmbeddingPreference {
-    match env::var("MEMPALACE_EMBEDDING_BACKEND")
-        .unwrap_or_else(|_| "auto".to_string())
-        .to_lowercase()
-        .as_str()
-    {
+    embedding_preference_from_str(
+        &env::var("MEMPALACE_EMBEDDING_BACKEND").unwrap_or_else(|_| "auto".to_string()),
+    )
+}
+
+pub fn embedding_preference_from_str(value: &str) -> EmbeddingPreference {
+    match value.to_lowercase().as_str() {
         "onnx" | "fastembed" => EmbeddingPreference::Onnx,
-        "local" | "strong_local" | "fallback" => EmbeddingPreference::StrongLocal,
+        "local" | "strong_local" | "fallback" | "openai" => EmbeddingPreference::StrongLocal,
         _ => EmbeddingPreference::Auto,
     }
 }
@@ -70,7 +74,7 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
         }
     }
 
-    let mut vector = vec![0.0f32; EMBED_DIM];
+    let mut vector = vec![0.0_f32; EMBED_DIM];
     for (term, weight) in &weights {
         let (primary, secondary, sign) = feature_positions(term);
         vector[primary] += *weight;
@@ -85,14 +89,13 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
 }
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    let len = a.len().min(b.len());
-    for i in 0..len {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
+    let mut dot = 0.0_f32;
+    let mut norm_a = 0.0_f32;
+    let mut norm_b = 0.0_f32;
+    for (left, right) in a.iter().zip(b.iter()) {
+        dot += left * right;
+        norm_a += left * left;
+        norm_b += right * right;
     }
     if norm_a <= f32::EPSILON || norm_b <= f32::EPSILON {
         0.0
@@ -108,7 +111,7 @@ pub fn phrase_overlap_score(query: &str, text: &str) -> f32 {
         return 0.0;
     }
 
-    let mut score = 0.0f32;
+    let mut score = 0.0_f32;
     if text_lower.contains(query_lower.trim()) {
         score += 1.0;
     }
@@ -155,11 +158,10 @@ pub fn encode_vector(vec: &[f32]) -> Vec<u8> {
 }
 
 pub fn decode_vector(bytes: &[u8]) -> Vec<f32> {
-    let mut out = Vec::new();
-    for chunk in bytes.chunks_exact(4) {
-        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    out
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 pub fn normalized_terms(text: &str) -> Vec<String> {
@@ -207,9 +209,9 @@ fn feature_positions(term: &str) -> (usize, usize, f32) {
     let mut h1: u64 = 0xcbf29ce484222325;
     let mut h2: u64 = 0x9e3779b97f4a7c15;
     for b in bytes {
-        h1 ^= *b as u64;
+        h1 ^= u64::from(*b);
         h1 = h1.wrapping_mul(0x100000001b3);
-        h2 ^= (*b as u64).wrapping_mul(0x9e3779b1);
+        h2 ^= u64::from(*b).wrapping_mul(0x9e3779b1);
         h2 = h2.rotate_left(7).wrapping_mul(0xc2b2ae35);
     }
     let primary = (h1 as usize) % EMBED_DIM;
@@ -227,6 +229,7 @@ fn normalize(vec: &mut [f32]) {
     }
 }
 
+#[cfg(feature = "onnx-embeddings")]
 fn pad_or_truncate(mut vec: Vec<f32>) -> Vec<f32> {
     if vec.len() > EMBED_DIM {
         vec.truncate(EMBED_DIM);

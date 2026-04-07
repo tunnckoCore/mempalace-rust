@@ -2,14 +2,22 @@ use crate::config::AppConfig;
 use crate::dialect::AAAK_SPEC;
 use crate::graph;
 use crate::kg::KnowledgeGraph;
+use crate::limits::{MAX_MCP_MESSAGE_BYTES, MAX_QUERY_CHARS};
 use crate::search::normalize_query_for_fts;
 use crate::storage::{DrawerInput, Storage};
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Write};
 
 const PALACE_PROTOCOL: &str = "IMPORTANT — MemPalace Memory Protocol:\n1. ON WAKE-UP: Call mempalace_status to load palace overview + AAAK spec.\n2. BEFORE RESPONDING about any person, project, or past event: call mempalace_kg_query or mempalace_search FIRST. Never guess — verify.\n3. IF UNSURE about a fact: say 'let me check' and query the palace.\n4. AFTER EACH SESSION: call mempalace_diary_write to record what happened.\n5. WHEN FACTS CHANGE: call mempalace_kg_invalidate on the old fact, mempalace_kg_add for the new one.";
+const MUTATING_TOOLS: &[&str] = &[
+    "mempalace_add_drawer",
+    "mempalace_delete_drawer",
+    "mempalace_kg_add",
+    "mempalace_kg_invalidate",
+    "mempalace_diary_write",
+];
 
 fn read_stdio_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>> {
     let mut first_line = String::new();
@@ -27,6 +35,9 @@ fn read_stdio_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>> {
             .map(str::trim)
             .ok_or_else(|| anyhow::anyhow!("invalid Content-Length header"))?
             .parse::<usize>()?;
+        if len > MAX_MCP_MESSAGE_BYTES {
+            anyhow::bail!("Content-Length exceeds maximum allowed size");
+        }
         let mut line = String::new();
         loop {
             line.clear();
@@ -41,6 +52,9 @@ fn read_stdio_message<R: BufRead>(reader: &mut R) -> Result<Option<Value>> {
         Ok(Some(req))
     } else {
         let line = first_line.trim();
+        if line.len() > MAX_MCP_MESSAGE_BYTES {
+            anyhow::bail!("JSON line exceeds maximum allowed size");
+        }
         if line.is_empty() {
             return Ok(Some(json!({})));
         }
@@ -106,7 +120,8 @@ fn handle_request(config: &AppConfig, req: Value) -> Result<Value> {
 }
 
 fn tool_inventory() -> Vec<Value> {
-    vec![
+    let allow_mutations = mutations_enabled();
+    let mut tools = vec![
         tool(
             "mempalace_status",
             "Palace overview — total drawers, wing and room counts",
@@ -207,14 +222,57 @@ fn tool_inventory() -> Vec<Value> {
             "Read an agent's recent diary entries",
             json!({"type":"object","properties":{"agent_name":{"type":"string"},"last_n":{"type":"integer"}},"required":["agent_name"]}),
         ),
-    ]
+    ];
+    if !allow_mutations {
+        tools.retain(|tool| {
+            tool.get("name")
+                .and_then(|value| value.as_str())
+                .map(|name| !MUTATING_TOOLS.contains(&name))
+                .unwrap_or(true)
+        });
+    }
+    tools
 }
 
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({"name":name,"description":description,"inputSchema":input_schema})
 }
 
+pub fn handle_test_request(config: &AppConfig, req: Value) -> Result<Value> {
+    handle_request(config, req)
+}
+
+fn mutations_enabled() -> bool {
+    std::env::var("MEMPALACE_ENABLE_MUTATIONS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn require_mutations_enabled(name: &str) -> Result<()> {
+    if MUTATING_TOOLS.contains(&name) && !mutations_enabled() {
+        anyhow::bail!(
+            "tool '{}' is disabled unless MEMPALACE_ENABLE_MUTATIONS=1",
+            name
+        );
+    }
+    Ok(())
+}
+
+fn generate_mutation_id(prefix: &str) -> String {
+    format!(
+        "{}_{}_{:x}",
+        prefix,
+        Utc::now().timestamp_millis(),
+        md5::compute(format!(
+            "{}:{}",
+            prefix,
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ))
+    )
+}
+
 fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
+    require_mutations_enabled(name)?;
     let storage = Storage::open(&config.palace_path)?;
     let kg = KnowledgeGraph::open(&config.config_dir)?;
     Ok(match name {
@@ -236,7 +294,11 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
         "mempalace_get_compact_context" => {
             let wing = args.get("wing").and_then(|v| v.as_str());
             let room = args.get("room").and_then(|v| v.as_str());
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10)
+                .clamp(1, 50) as usize;
             let drawers = storage.scoped_drawers(wing, room, limit)?;
             let compact: Vec<_> = drawers
                 .into_iter()
@@ -261,10 +323,16 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("query")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5)
+                .clamp(1, 50) as usize;
             let wing = args.get("wing").and_then(|v| v.as_str());
             let room = args.get("room").and_then(|v| v.as_str());
-            if normalize_query_for_fts(query).is_none() {
+            if query.chars().count() > MAX_QUERY_CHARS {
+                json!({"error":"query exceeds max length"})
+            } else if normalize_query_for_fts(query).is_none() {
                 json!({"error":"query must contain at least one alphanumeric token with length >= 2"})
             } else {
                 json!({"query": query, "results": storage.search_hybrid(query, wing, room, limit)?})
@@ -278,7 +346,8 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
             let threshold = args
                 .get("threshold")
                 .and_then(|v| v.as_f64())
-                .unwrap_or(0.85);
+                .unwrap_or(0.85)
+                .clamp(0.0, 1.0);
             if content.trim().is_empty() {
                 json!({"error": "content must not be empty"})
             } else {
@@ -311,12 +380,14 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .unwrap_or("mcp");
             if wing.is_empty() || room.is_empty() || content.is_empty() {
                 json!({"success": false, "error": "wing, room, and content are required and must not be empty"})
+            } else if content.chars().count() > MAX_QUERY_CHARS {
+                json!({"success": false, "error": "content exceeds max length"})
             } else {
                 let dup = storage.check_duplicate(content, 0.85)?;
                 if dup.get("is_duplicate").and_then(|v| v.as_bool()) == Some(true) {
                     json!({"success": false, "reason": "duplicate", "matches": dup.get("matches")})
                 } else {
-                    let id = format!("drawer_{}_{}_{}", wing, room, Utc::now().timestamp());
+                    let id = generate_mutation_id(&format!("drawer_{}_{}", wing, room));
                     storage.add_drawer(DrawerInput {
                         id: &id,
                         wing,
@@ -349,6 +420,7 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("entity")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            ensure!(!entity.trim().is_empty(), "entity is required");
             let as_of = args.get("as_of").and_then(|v| v.as_str());
             let direction = args
                 .get("direction")
@@ -370,6 +442,12 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("object")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            ensure!(
+                !subject.trim().is_empty()
+                    && !predicate.trim().is_empty()
+                    && !object.trim().is_empty(),
+                "subject, predicate, and object are required"
+            );
             let valid_from = args.get("valid_from").and_then(|v| v.as_str());
             let source_closet = args.get("source_closet").and_then(|v| v.as_str());
             let triple_id = kg.add_triple(
@@ -397,6 +475,12 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("object")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            ensure!(
+                !subject.trim().is_empty()
+                    && !predicate.trim().is_empty()
+                    && !object.trim().is_empty(),
+                "subject, predicate, and object are required"
+            );
             let ended = args.get("ended").and_then(|v| v.as_str());
             kg.invalidate(subject, predicate, object, ended)?;
             json!({"success": true})
@@ -411,7 +495,11 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("start_room")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let max_hops = args.get("max_hops").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+            let max_hops = args
+                .get("max_hops")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2)
+                .clamp(1, 6) as usize;
             graph::traverse(&storage, start_room, max_hops)?
         }
         "mempalace_find_tunnels" => {
@@ -436,7 +524,7 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
             let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
             let room = "diary";
             let now = Utc::now();
-            let entry_id = format!("diary_{}_{}", wing, now.timestamp());
+            let entry_id = generate_mutation_id(&format!("diary_{}", wing));
             storage.add_drawer(DrawerInput {
                 id: &entry_id,
                 wing: &wing,
@@ -460,7 +548,11 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
                 .get("agent_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            let last_n = args.get("last_n").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let last_n = args
+                .get("last_n")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10)
+                .clamp(1, 100) as usize;
             let wing = format!("wing_{}", agent_name.to_lowercase().replace(' ', "_"));
             let entries = storage.sample_for_wing(Some(&wing), last_n)?;
             let entries: Vec<_> = entries.into_iter().filter(|d| d.room == "diary").map(|d| json!({"date": d.date, "timestamp": d.filed_at, "topic": "general", "content": d.content})).collect();
