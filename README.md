@@ -1,280 +1,330 @@
 # mempalace-rust
 
-Parity-oriented Rust migration of `./mempalace`, implemented only from the reference Python project and this Rust directory.
+_This is Rust port/re-implementation (not a direct fork) of the [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) project, which might have been inspired by [SaraBrain](https://github.com/LunarFawn/SaraBrain). The port was largely done using [Pi Coding Agent](https://github.com/badlogic/pi-mono) and OpenAI GPT-5.4 - it's a work in progress and may not be as good as the original._
 
-## Architecture
+MemPalace is a local memory system for projects, conversations, and agent workflows. This Rust implementation stores everything in SQLite, supports hybrid retrieval, and exposes both a CLI and an MCP server.
 
-This pass moves the Rust version closer to the Python MemPalace architecture rather than a stripped-down CLI.
+## What it does
 
-### Storage core
+MemPalace ingests source material into a global, structured "palace" of memories:
 
-Primary storage remains SQLite under the palace directory:
+- **wings** separate projects, agents, or source domains
+- **rooms** organize memories by topic
+- **drawers** store raw chunks and derived artifacts
+- **vectors** support semantic retrieval
+- **FTS** supports lexical retrieval
 
-- `mempalace.sqlite3`
-- active/inactive drawer lifecycle tracking
-- source revision tracking for incremental re-mining
-- FTS5 lexical index
-- persisted vector table for semantic retrieval
-- derived artifact support via `drawer_type`
+The result is a searchable local memory store that can be mined from codebases and conversations, queried from the CLI, and connected to MCP clients.
 
-### Retrieval model
+## Core architecture
 
-Search is now **hybrid** instead of FTS-only:
+### Storage
 
-- lexical retrieval via SQLite FTS5
-- semantic retrieval via vectors persisted in SQLite
-- reciprocal-rank-style fusion plus heuristic reranking
+The palace lives in SQLite at:
 
-Embedding backends:
-
-- **default / fallback path**: strong local in-process vectorizer (stemming + weighted n-grams + signed feature hashing)
-- **optional real backend**: ONNX/local model embedding via `fastembed` behind the `onnx-embeddings` Cargo feature
-- **optional OpenAI backend**: live OpenAI embeddings over HTTPS using `OPENAI_API_KEY`
-
-This keeps SQLite as source of truth while allowing a stronger semantic backend when enabled.
-
-### Incremental mining semantics
-
-Mining no longer skips only by `source_file` existence.
-
-For both project and conversation mining:
-
-- normalized/read content is hashed
-- source revision is compared against stored hash
-- unchanged sources are skipped
-- changed sources are refreshed transactionally
-- new drawers/artifacts are inserted before prior revisions for that source are retired
-- source revision metadata is updated only after the refresh succeeds
-
-### Memory architecture
-
-Rust now includes a layered memory model inspired by Python:
-
-- **L0** identity from `~/.mempalace/identity.txt`
-- **L1** essential story built from top recent drawers grouped by room
-- **L2** filtered recall
-- **L3** deep hybrid search
-
-`wake-up` now uses the layered stack rather than an ad hoc summary.
-
-### AAAK
-
-A practical Rust AAAK dialect port is included:
-
-- entity/topic/emotion/flag detection
-- compression stats
-- `compress` CLI command
-- compressed artifacts can be stored back into the palace as derived records
-- AAAK spec is exposed through MCP/status flows
-
-### Extractors
-
-Conversation mining supports:
-
-- `exchange` mode
-- `general` mode with heuristic extraction of:
-  - decisions
-  - preferences
-  - milestones
-  - problems
-  - emotional memories
-
-General extraction outputs are stored as derived retrievable artifacts.
-
-### Knowledge graph
-
-A Rust SQLite-backed temporal KG is included:
-
-- entities
-- triples
-- valid_from / valid_to
-- invalidate semantics
-- entity query
-- timeline
-- stats
-
-### Palace graph
-
-Metadata-derived room graph support is included:
-
-- graph build
-- traversal
-- tunnel finding
-- graph stats
-- basic hall metadata generation during mining for better graph usefulness
-
-### MCP coverage
-
-The stdio MCP server now exposes a much larger Python-aligned tool inventory.
-
-Transport handling now supports:
-
-- standard `Content-Length` framed stdio messages
-- newline-delimited JSON as a simpler fallback input mode
-
-Responses are emitted with `Content-Length` framing for better MCP compatibility.
-
-The tool inventory includes:
-
-- `mempalace_status`
-- `mempalace_list_wings`
-- `mempalace_list_rooms`
-- `mempalace_get_taxonomy`
-- `mempalace_get_aaak_spec`
-- `mempalace_search`
-- `mempalace_check_duplicate`
-- `mempalace_add_drawer`
-- `mempalace_delete_drawer`
-- `mempalace_kg_query`
-- `mempalace_kg_add`
-- `mempalace_kg_invalidate`
-- `mempalace_kg_timeline`
-- `mempalace_kg_stats`
-- `mempalace_traverse`
-- `mempalace_find_tunnels`
-- `mempalace_graph_stats`
-- `mempalace_diary_write`
-- `mempalace_diary_read`
-
-## Embedding backend selection
-
-Runtime/backend selection is controlled by:
-
-- CLI: `--embedding-backend auto|strong_local|onnx|openai`, `--openai-embedding-model`, `--openai-api-key`, `--openai-base-url`
-- env: `MEMPALACE_EMBEDDING_BACKEND`, `OPENAI_API_KEY`, `MEMPALACE_OPENAI_EMBEDDING_MODEL`, `MEMPALACE_OPENAI_BASE_URL`
-- config: `~/.mempalace/config.json` → `embedding_backend`, `openai_embedding_model`, `openai_base_url`
-
-Behavior:
-
-- `auto` (default): try OpenAI first when configured, then ONNX if compiled and available, otherwise fall back cleanly
-- `openai`: require OpenAI embeddings; missing key/model or request failures are surfaced clearly
-- `onnx`: prefer ONNX backend, but still fall back if model/backend initialization fails at runtime
-- `strong_local`: force the built-in local vectorizer
-
-Precedence:
-- CLI flags
-- environment variables
-- config file
-- defaults
-
-OpenAI examples:
-
-```bash
-export OPENAI_API_KEY=sk-...
-cargo run -- search "why did we switch to GraphQL" --embedding-backend openai
-cargo run -- benchmark ./bench.json --backend openai --openai-embedding-model text-embedding-3-small
+```text
+<palace-path>/mempalace.sqlite3
 ```
 
-Optional ONNX build:
+Key persisted data:
+
+- raw drawers and derived artifacts
+- source revision tracking for incremental refresh
+- stored vectors for semantic search
+- SQLite FTS5 index for lexical search
+
+### Retrieval
+
+Search is hybrid by default:
+
+- lexical retrieval via SQLite FTS5
+- semantic retrieval via stored vectors
+- heuristic reranking and fused scoring
+
+### Memory layers
+
+Wake-up uses a layered memory model:
+
+- **L0** — identity text from `~/.mempalace/identity.txt`
+- **L1** — essential story built from recent important drawers
+- **L2** — scoped recall
+- **L3** — deep search
+
+### Derived memory features
+
+The project also includes:
+
+- AAAK compression and compact artifacts
+- general extraction from conversations
+- a temporal knowledge graph
+- a room graph for traversal and tunnel finding
+- an MCP server for external clients
+
+## Build and install
+
+### Requirements
+
+- Rust toolchain
+- SQLite is bundled through `rusqlite`'s bundled feature
+
+### Build
+
+```bash
+cargo build
+```
+
+Run the CLI:
+
+```bash
+cargo run -- --help
+```
+
+### Optional ONNX embeddings
+
+To enable the ONNX local embedding backend:
 
 ```bash
 cargo build --features onnx-embeddings
 ```
 
-Optional model cache dir:
+## Quick start
+
+Initialize MemPalace for a project:
 
 ```bash
-export MEMPALACE_EMBEDDING_MODEL_DIR=/path/to/model-cache
+cargo run -- init .
 ```
 
-## CLI
+Mine the current project:
 
-Examples:
+```bash
+cargo run -- mine . --mode projects
+```
+
+Search the palace:
+
+```bash
+cargo run -- search "how openai embedding backend works"
+```
+
+Show palace status:
+
+```bash
+cargo run -- status
+```
+
+Render the wake-up summary:
+
+```bash
+cargo run -- wake-up
+```
+
+Start the MCP server:
+
+```bash
+cargo run -- mcp --transport stdio
+```
+
+## Configuration model
+
+MemPalace uses both global and per-project config.
+
+It stores all memories into a "global store". If you run it from a project that has "local config" it would know how to narrow the search to be scoped only for that project.
+
+### Global config
+
+Global state lives under:
+
+```
+~/.mempalace
+```
+
+Important files:
+
+- `~/.mempalace/config.json`
+- `~/.mempalace/identity.txt`
+- `~/.mempalace/palace/`
+
+### Per-project config
+
+Projects can define `mempalace.yaml`:
+
+```yaml
+wing: my-project
+rooms:
+  - name: general
+    keywords: []
+  - name: src
+    keywords: []
+```
+
+The `init` command creates this file automatically if it does not already exist.
+
+## Key commands
+
+### `init`
+
+Create global config if needed and create a project `mempalace.yaml`.
 
 ```bash
 cargo run -- init /path/to/project
+```
+
+### `mine` (import)
+
+Mine/import a project or a conversation directory into the palace.
+
+```bash
 cargo run -- mine /path/to/project --mode projects
 cargo run -- mine /path/to/chats --mode convos --extract exchange
 cargo run -- mine /path/to/chats --mode convos --extract general
-cargo run -- search "why did we switch to GraphQL"
+```
+
+Useful flags:
+
+- `--wing <name>`
+- `--limit <n>`
+- `--dry-run`
+- `--agent <name>`
+
+### `search`
+
+Hybrid search with optional wing and room filtering.
+
+```bash
+cargo run -- search "typed GraphQL queries"
+cargo run -- search "typed GraphQL queries" --wing my-app --room architecture --results 10
+```
+
+### `status`
+
+Show total drawer counts grouped by wing and room.
+
+```bash
 cargo run -- status
+```
+
+### `wake-up`
+
+Render the L0 + L1 summary, optionally scoped to a wing.
+
+```bash
 cargo run -- wake-up
-cargo run -- compress --wing myapp
+cargo run -- wake-up --wing my-app
+```
+
+### `compress`
+
+Generate and store AAAK compressed artifacts.
+
+```bash
+cargo run -- compress
+cargo run -- compress --wing my-app
+```
+
+### `mcp`
+
+Run the stdio MCP server.
+
+```bash
 cargo run -- mcp --transport stdio
+```
+
+### `benchmark`
+
+Evaluate retrieval quality on a benchmark dataset.
+
+```bash
 cargo run -- benchmark ./bench.json --backend hybrid --k 5
 ```
 
-## Benchmark runner
+## Embedding choices
 
-A benchmark/eval runner is included via the `benchmark` CLI command.
+MemPalace supports three backend modes:
 
-Supported dataset formats:
-
-JSON:
-```json
-{
-  "documents": [
-    {"id": "doc1", "wing": "app", "room": "architecture", "content": "...", "source_file": "bench/doc1.md"}
-  ],
-  "queries": [
-    {"id": "q1", "query": "typed GraphQL queries", "relevant_ids": ["doc1"]}
-  ]
-}
-```
-
-JSONL:
-```json
-{"kind":"document","id":"doc1","wing":"app","room":"architecture","content":"..."}
-{"kind":"query","id":"q1","query":"typed GraphQL queries","relevant_ids":["doc1"]}
-```
-
-Output metrics:
-- Recall@k
-- MRR
-- NDCG@k
-
-Backends:
-- `fts`
+- `auto`
 - `local`
-- `onnx`
 - `openai`
-- `hybrid`
 
-## What is now implemented
+Local provider choices:
 
-- Python-compatible config location/env handling
-- project mining
-- conversation mining
-- general extraction mode
-- incremental source revision tracking
-- hybrid retrieval
-- optional ONNX/local pretrained embedding backend
-- layered memory stack for wake-up
-- AAAK compression path
-- knowledge graph tables and APIs
-- palace graph utilities
-- expanded MCP tool surface
-- derived artifact storage (`drawer_type`)
+- `auto`
+- `builtin`
+- `onnx`
 
+Examples:
 
-### Retrieval caveats
+Use the default automatic selection:
 
-- Default semantic retrieval is still not a true neural embedding model unless built with the optional `onnx-embeddings` feature.
-- The optional ONNX path improves semantic retrieval materially, but still does not guarantee parity with the Python stack's exact embedding behavior.
-- Fusion/reranking is stronger now, but still heuristic.
+```bash
+cargo run -- search "deployment incident"
+```
 
-### AAAK caveats
+Force the built-in local provider:
 
-- The Rust dialect is a practical port of the plain-text compression behavior, not a complete port of every legacy zettel-oriented path in `dialect.py`.
+```bash
+cargo run -- search "deployment incident" \
+  --embedding-backend local \
+  --local-embedding-provider builtin
+```
 
-### Layering caveats
+### Use ONNX embeddings:
 
-- L1 scoring is still simpler than Python's full importance metadata interpretation.
-- L2 currently uses hybrid retrieval over a generic query seed rather than a dedicated retrieval-only path identical to Python.
+```bash
+cargo run --features onnx-embeddings -- search "deployment incident" \
+  --embedding-backend local \
+  --local-embedding-provider onnx
+```
 
-### Mining / refresh caveats
+### Use OpenAI embeddings:
 
-- Runtime ingestion/compression/benchmark refresh paths now use owned refresh plans instead of `Box::leak`-driven planning.
+```bash
+export OPENAI_API_KEY=sk-...
+cargo run -- search "deployment incident" --embedding-backend openai
+```
 
-## File layout
+Embedding configuration precedence is:
 
-- `src/storage.rs` — SQLite storage, vectors, revisions, hybrid retrieval
-- `src/embedding.rs` — embedding backend selection, optional ONNX path, local fallback vectorization
-- `src/layers.rs` — L0/L1/L2/L3 stack
-- `src/dialect.rs` — AAAK compression
-- `src/extractor.rs` — general memory extraction
+1. CLI flags
+2. environment variables
+3. `~/.mempalace/config.json`
+4. defaults
+
+## MCP usage notes
+
+The MCP server:
+
+- supports `stdio` transport
+- accepts `Content-Length` framed input and newline-delimited JSON input
+- writes startup logging to stderr
+- gates mutating tools behind `MEMPALACE_ENABLE_MUTATIONS=1`
+
+## Project layout
+
+Important source files:
+
+- `src/storage.rs` — SQLite storage, vectors, refresh logic, hybrid search
+- `src/embedding.rs` — backend selection and embedding providers
+- `src/project.rs` — project init and mining
+- `src/convo.rs` — conversation mining
+- `src/layers.rs` — layered memory stack
+- `src/dialect.rs` — AAAK compression dialect
 - `src/kg.rs` — temporal knowledge graph
-- `src/graph.rs` — palace graph traversal and tunnel logic
-- `src/mcp.rs` — expanded MCP server
-- `src/project.rs` — project mining with updates
-- `src/convo.rs` — convo mining with extract modes and updates
+- `src/graph.rs` — room graph traversal and tunnel logic
+- `src/mcp.rs` — MCP server
+- `src/bench.rs` — benchmark runner
+
+## More documentation
+
+See the focused docs in `docs/`:
+
+- [`docs/embeddings.md`](docs/embeddings.md)
+- [`docs/init-config-storage.md`](docs/init-config-storage.md)
+- [`docs/mcp.md`](docs/mcp.md)
+- [`docs/benchmarking.md`](docs/benchmarking.md)
+
+## License
+
+GPL-3.0-or-later, 2026.
+
+It's not a direct fork of [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace), but spiritual re-implementation in Rust.

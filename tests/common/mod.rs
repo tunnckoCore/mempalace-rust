@@ -24,7 +24,8 @@ pub fn app_config(config_root: &Path, palace_path: &Path) -> mempalace_rust::con
         palace_path: palace_path.to_path_buf(),
         collection_name: "mempalace_drawers".to_string(),
         people_map: HashMap::new(),
-        embedding_backend: "strong_local".to_string(),
+        embedding_backend: "local".to_string(),
+        local_embedding_provider: "builtin".to_string(),
         openai_embedding_model: "text-embedding-3-small".to_string(),
         openai_base_url: "https://api.openai.com/v1".to_string(),
     }

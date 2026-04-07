@@ -50,7 +50,7 @@ fn hybrid_search_prefers_phrase_match_and_sets_backend() {
         .expect("search");
     assert!(!hits.is_empty());
     assert_eq!(hits[0].id, "d1");
-    assert_eq!(hits[0].embedding_backend, "strong_local");
+    assert_eq!(hits[0].embedding_backend, "local_builtin");
 }
 
 #[test]

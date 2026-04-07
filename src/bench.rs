@@ -1,6 +1,6 @@
-use crate::embedding::EmbeddingPreference;
 #[cfg(test)]
 use crate::embedding::{embed_text_with_preference, embedding_preference_from_str};
+use crate::embedding::{EmbeddingPreference, LocalEmbeddingProvider};
 use crate::limits::{MAX_BENCHMARK_BYTES, MAX_BENCHMARK_DOCS};
 use crate::storage::Storage;
 use crate::storage_types::{DrawerInputOwned, SourceRefreshPlanOwned};
@@ -110,11 +110,28 @@ pub fn run_benchmark(
                 .collect(),
             BenchmarkBackend::Local | BenchmarkBackend::Onnx | BenchmarkBackend::Openai => {
                 let preference = match backend {
-                    BenchmarkBackend::Local => EmbeddingPreference::StrongLocal,
-                    BenchmarkBackend::Onnx => EmbeddingPreference::Onnx,
                     BenchmarkBackend::Openai => EmbeddingPreference::OpenAi,
+                    BenchmarkBackend::Local | BenchmarkBackend::Onnx => EmbeddingPreference::Local,
                     _ => EmbeddingPreference::Auto,
                 };
+                match backend {
+                    BenchmarkBackend::Local => {
+                        std::env::set_var("MEMPALACE_LOCAL_EMBEDDING_PROVIDER", "builtin")
+                    }
+                    BenchmarkBackend::Onnx => {
+                        std::env::set_var("MEMPALACE_LOCAL_EMBEDDING_PROVIDER", "onnx")
+                    }
+                    BenchmarkBackend::Openai | BenchmarkBackend::Hybrid | BenchmarkBackend::Fts => {
+                        std::env::set_var(
+                            "MEMPALACE_LOCAL_EMBEDDING_PROVIDER",
+                            match LocalEmbeddingProvider::Auto {
+                                LocalEmbeddingProvider::Auto => "auto",
+                                LocalEmbeddingProvider::Builtin => "builtin",
+                                LocalEmbeddingProvider::Onnx => "onnx",
+                            },
+                        )
+                    }
+                }
                 storage.semantic_debug_search(&case.query, preference, k)?
             }
         };

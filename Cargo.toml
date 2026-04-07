@@ -3,7 +3,7 @@ name = "mempalace-rust"
 version = "0.1.0"
 edition = "2021"
 description = "Rust migration of MemPalace with SQLite-backed local memory storage"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "mempalace-rust"

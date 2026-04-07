@@ -563,8 +563,8 @@ impl Storage {
                 as f64;
             hit.embedding_backend = match query_embedding.backend {
                 EmbeddingBackend::OpenAi => "openai".to_string(),
-                EmbeddingBackend::OnnxLocal => "onnx_local".to_string(),
-                EmbeddingBackend::StrongLocal => "strong_local".to_string(),
+                EmbeddingBackend::LocalOnnx => "local_onnx".to_string(),
+                EmbeddingBackend::LocalBuiltin => "local_builtin".to_string(),
                 EmbeddingBackend::LexicalFallback => "lexical_fallback".to_string(),
             };
             hits.push(hit);
@@ -614,8 +614,8 @@ impl Storage {
                     as f64;
                 hit.embedding_backend = match query_embedding.backend {
                     EmbeddingBackend::OpenAi => "openai".to_string(),
-                    EmbeddingBackend::OnnxLocal => "onnx_local".to_string(),
-                    EmbeddingBackend::StrongLocal => "strong_local".to_string(),
+                    EmbeddingBackend::LocalOnnx => "local_onnx".to_string(),
+                    EmbeddingBackend::LocalBuiltin => "local_builtin".to_string(),
                     EmbeddingBackend::LexicalFallback => "lexical_fallback".to_string(),
                 };
                 hits.push(hit);

@@ -19,6 +19,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub embedding_backend: Option<String>,
     #[serde(default)]
+    pub local_embedding_provider: Option<String>,
+    #[serde(default)]
     pub openai_embedding_model: Option<String>,
     #[serde(default)]
     pub openai_base_url: Option<String>,
@@ -33,6 +35,7 @@ pub struct AppConfig {
     pub collection_name: String,
     pub people_map: HashMap<String, String>,
     pub embedding_backend: String,
+    pub local_embedding_provider: String,
     pub openai_embedding_model: String,
     pub openai_base_url: String,
 }
@@ -51,6 +54,7 @@ impl AppConfig {
                 collection_name: None,
                 people_map: HashMap::new(),
                 embedding_backend: None,
+                local_embedding_provider: None,
                 openai_embedding_model: None,
                 openai_base_url: None,
             })
@@ -60,6 +64,7 @@ impl AppConfig {
                 collection_name: None,
                 people_map: HashMap::new(),
                 embedding_backend: None,
+                local_embedding_provider: None,
                 openai_embedding_model: None,
                 openai_base_url: None,
             }
@@ -90,6 +95,10 @@ impl AppConfig {
                 .ok()
                 .or(file_cfg.embedding_backend)
                 .unwrap_or_else(|| "auto".to_string()),
+            local_embedding_provider: env::var("MEMPALACE_LOCAL_EMBEDDING_PROVIDER")
+                .ok()
+                .or(file_cfg.local_embedding_provider)
+                .unwrap_or_else(|| "auto".to_string()),
             openai_embedding_model: env::var("MEMPALACE_OPENAI_EMBEDDING_MODEL")
                 .ok()
                 .or(file_cfg.openai_embedding_model)
@@ -110,6 +119,7 @@ impl AppConfig {
                 collection_name: Some(self.collection_name.clone()),
                 people_map: self.people_map.clone(),
                 embedding_backend: Some(self.embedding_backend.clone()),
+                local_embedding_provider: Some(self.local_embedding_provider.clone()),
                 openai_embedding_model: Some(self.openai_embedding_model.clone()),
                 openai_base_url: Some(self.openai_base_url.clone()),
             })?;

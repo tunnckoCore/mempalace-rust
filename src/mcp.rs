@@ -73,8 +73,8 @@ fn write_stdio_message<W: Write>(writer: &mut W, resp: &Value) -> Result<()> {
 
 pub fn run_stdio_server(config: &AppConfig) -> Result<()> {
     eprintln!(
-        "mempalace-rust MCP ready (transport=stdio, backend={})",
-        config.embedding_backend
+        "mempalace-rust MCP ready (transport=stdio, backend={}, local_provider={})",
+        config.embedding_backend, config.local_embedding_provider
     );
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -282,7 +282,7 @@ fn call_tool(config: &AppConfig, name: &str, args: &Value) -> Result<Value> {
     Ok(match name {
         "mempalace_status" => {
             let status = storage.status()?;
-            json!({"total_drawers": status.total_drawers, "wings": status.by_wing.keys().collect::<Vec<_>>(), "rooms": status.by_wing, "palace_path": config.palace_path, "protocol": PALACE_PROTOCOL, "aaak_dialect": AAAK_SPEC, "artifact_types": status.artifacts_by_type, "compact_context_available": true, "embedding_backend": config.embedding_backend, "openai_embedding_model": config.openai_embedding_model, "openai_base_url": config.openai_base_url})
+            json!({"total_drawers": status.total_drawers, "wings": status.by_wing.keys().collect::<Vec<_>>(), "rooms": status.by_wing, "palace_path": config.palace_path, "protocol": PALACE_PROTOCOL, "aaak_dialect": AAAK_SPEC, "artifact_types": status.artifacts_by_type, "compact_context_available": true, "embedding_backend": config.embedding_backend, "local_embedding_provider": config.local_embedding_provider, "openai_embedding_model": config.openai_embedding_model, "openai_base_url": config.openai_base_url})
         }
         "mempalace_list_wings" => json!({"wings": storage.top_wings(100)?}),
         "mempalace_list_rooms" => {

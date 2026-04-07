@@ -17,3 +17,8 @@ pub mod search;
 pub mod storage;
 pub mod storage_types;
 pub mod wakeup;
+
+pub use crate::embedding::{
+    embedding_preference_from_str, local_provider_from_str, runtime_config_from_sources,
+    validate_runtime_config, EmbeddingPreference, EmbeddingRuntimeConfig, LocalEmbeddingProvider,
+};

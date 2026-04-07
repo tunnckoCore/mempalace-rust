@@ -25,6 +25,8 @@ struct Cli {
     #[arg(long)]
     embedding_backend: Option<String>,
     #[arg(long)]
+    local_embedding_provider: Option<String>,
+    #[arg(long)]
     openai_embedding_model: Option<String>,
     #[arg(long)]
     openai_api_key: Option<String>,
@@ -120,6 +122,9 @@ pub fn run() -> Result<()> {
     if let Some(backend) = cli.embedding_backend.clone() {
         config.embedding_backend = backend;
     }
+    if let Some(local_provider) = cli.local_embedding_provider.clone() {
+        config.local_embedding_provider = local_provider;
+    }
     if let Some(model) = cli.openai_embedding_model.clone() {
         config.openai_embedding_model = model;
     }
@@ -128,6 +133,7 @@ pub fn run() -> Result<()> {
     }
     let runtime_config = runtime_config_from_sources(
         Some(&config.embedding_backend),
+        Some(&config.local_embedding_provider),
         Some(&config.openai_embedding_model),
         cli.openai_api_key.as_deref(),
         Some(&config.openai_base_url),
@@ -147,6 +153,10 @@ pub fn run() -> Result<()> {
             println!("global config: {}", config.config_file.display());
             println!("palace path: {}", config.palace_path.display());
             println!("embedding backend: {}", config.embedding_backend);
+            println!(
+                "local embedding provider: {}",
+                config.local_embedding_provider
+            );
             println!("openai embedding model: {}", config.openai_embedding_model);
             println!("openai base url: {}", config.openai_base_url);
         }

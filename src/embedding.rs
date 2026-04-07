@@ -14,8 +14,8 @@ const MAX_NGRAMS: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingBackend {
     OpenAi,
-    OnnxLocal,
-    StrongLocal,
+    LocalOnnx,
+    LocalBuiltin,
     LexicalFallback,
 }
 
@@ -29,7 +29,13 @@ pub struct EmbeddingResult {
 pub enum EmbeddingPreference {
     Auto,
     OpenAi,
-    StrongLocal,
+    Local,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalEmbeddingProvider {
+    Auto,
+    Builtin,
     Onnx,
 }
 
@@ -43,6 +49,7 @@ pub struct OpenAiEmbeddingConfig {
 #[derive(Debug, Clone)]
 pub struct EmbeddingRuntimeConfig {
     pub preference: EmbeddingPreference,
+    pub local_provider: LocalEmbeddingProvider,
     pub openai: Option<OpenAiEmbeddingConfig>,
 }
 
@@ -64,15 +71,23 @@ pub fn embedding_preference_from_env() -> EmbeddingPreference {
 
 pub fn embedding_preference_from_str(value: &str) -> EmbeddingPreference {
     match value.to_lowercase().as_str() {
-        "onnx" | "fastembed" => EmbeddingPreference::Onnx,
         "openai" => EmbeddingPreference::OpenAi,
-        "local" | "strong_local" | "fallback" => EmbeddingPreference::StrongLocal,
+        "local" | "strong_local" | "fallback" | "onnx" | "fastembed" => EmbeddingPreference::Local,
         _ => EmbeddingPreference::Auto,
+    }
+}
+
+pub fn local_provider_from_str(value: &str) -> LocalEmbeddingProvider {
+    match value.to_lowercase().as_str() {
+        "onnx" | "fastembed" => LocalEmbeddingProvider::Onnx,
+        "builtin" | "built_in" | "strong_local" | "fallback" => LocalEmbeddingProvider::Builtin,
+        _ => LocalEmbeddingProvider::Auto,
     }
 }
 
 pub fn runtime_config_from_sources(
     backend: Option<&str>,
+    local_provider: Option<&str>,
     openai_model: Option<&str>,
     openai_api_key: Option<&str>,
     openai_base_url: Option<&str>,
@@ -80,6 +95,14 @@ pub fn runtime_config_from_sources(
     let preference = backend
         .map(embedding_preference_from_str)
         .unwrap_or_else(embedding_preference_from_env);
+    let local_provider = local_provider
+        .map(local_provider_from_str)
+        .or_else(|| {
+            env::var("MEMPALACE_LOCAL_EMBEDDING_PROVIDER")
+                .ok()
+                .map(|value| local_provider_from_str(&value))
+        })
+        .unwrap_or(LocalEmbeddingProvider::Auto);
     let api_key = openai_api_key
         .map(ToString::to_string)
         .or_else(|| env::var("OPENAI_API_KEY").ok())
@@ -95,6 +118,7 @@ pub fn runtime_config_from_sources(
 
     EmbeddingRuntimeConfig {
         preference,
+        local_provider,
         openai: api_key.map(|api_key| OpenAiEmbeddingConfig {
             api_key,
             model,
@@ -109,8 +133,15 @@ pub fn apply_runtime_config(config: &EmbeddingRuntimeConfig) {
         match config.preference {
             EmbeddingPreference::Auto => "auto",
             EmbeddingPreference::OpenAi => "openai",
-            EmbeddingPreference::StrongLocal => "strong_local",
-            EmbeddingPreference::Onnx => "onnx",
+            EmbeddingPreference::Local => "local",
+        },
+    );
+    env::set_var(
+        "MEMPALACE_LOCAL_EMBEDDING_PROVIDER",
+        match config.local_provider {
+            LocalEmbeddingProvider::Auto => "auto",
+            LocalEmbeddingProvider::Builtin => "builtin",
+            LocalEmbeddingProvider::Onnx => "onnx",
         },
     );
     if let Some(openai) = &config.openai {
@@ -149,7 +180,7 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
         };
     }
 
-    if preference != EmbeddingPreference::StrongLocal {
+    if preference != EmbeddingPreference::Local {
         match try_real_embedding(text, preference) {
             Ok(Some((vector, backend))) => {
                 return EmbeddingResult { vector, backend };
@@ -161,6 +192,8 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
                 }
             }
         }
+    } else if let Some((vector, backend)) = try_local_provider_embedding(text) {
+        return EmbeddingResult { vector, backend };
     }
 
     let mut weights: HashMap<String, f32> = HashMap::new();
@@ -184,7 +217,7 @@ pub fn embed_text_with_preference(text: &str, preference: EmbeddingPreference) -
     normalize(&mut vector);
     EmbeddingResult {
         vector,
-        backend: EmbeddingBackend::StrongLocal,
+        backend: EmbeddingBackend::LocalBuiltin,
     }
 }
 
@@ -346,8 +379,8 @@ fn try_real_embedding(
     text: &str,
     preference: EmbeddingPreference,
 ) -> Result<Option<(Vec<f32>, EmbeddingBackend)>> {
-    if preference == EmbeddingPreference::StrongLocal {
-        return Ok(None);
+    if preference == EmbeddingPreference::Local {
+        return Ok(try_local_provider_embedding(text));
     }
     if matches!(
         preference,
@@ -370,13 +403,8 @@ fn try_real_embedding(
         }
     }
 
-    #[cfg(feature = "onnx-embeddings")]
-    {
-        if preference != EmbeddingPreference::OpenAi {
-            if let Some(vector) = try_onnx_embedding(text) {
-                return Ok(Some((vector, EmbeddingBackend::OnnxLocal)));
-            }
-        }
+    if let Some(vector) = try_local_provider_embedding(text) {
+        return Ok(Some(vector));
     }
 
     if preference == EmbeddingPreference::OpenAi {
@@ -384,6 +412,23 @@ fn try_real_embedding(
     }
 
     Ok(None)
+}
+
+fn try_local_provider_embedding(text: &str) -> Option<(Vec<f32>, EmbeddingBackend)> {
+    match env::var("MEMPALACE_LOCAL_EMBEDDING_PROVIDER")
+        .ok()
+        .as_deref()
+        .map(local_provider_from_str)
+        .unwrap_or(LocalEmbeddingProvider::Auto)
+    {
+        LocalEmbeddingProvider::Builtin => None,
+        LocalEmbeddingProvider::Onnx => {
+            try_onnx_embedding(text).map(|vector| (vector, EmbeddingBackend::LocalOnnx))
+        }
+        LocalEmbeddingProvider::Auto => {
+            try_onnx_embedding(text).map(|vector| (vector, EmbeddingBackend::LocalOnnx))
+        }
+    }
 }
 
 #[cfg(feature = "onnx-embeddings")]
@@ -400,6 +445,11 @@ fn try_onnx_embedding(text: &str) -> Option<Vec<f32>> {
     let model = model.as_ref()?;
     let vectors = model.embed(vec![text.to_string()], None).ok()?;
     vectors.into_iter().next().map(pad_or_truncate)
+}
+
+#[cfg(not(feature = "onnx-embeddings"))]
+fn try_onnx_embedding(_text: &str) -> Option<Vec<f32>> {
+    None
 }
 
 fn try_openai_embedding(text: &str) -> Result<Option<Vec<f32>>> {
