@@ -1,6 +1,8 @@
 # mempalace-rust
 
-_This is Rust port/re-implementation (not a direct fork) of the [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) project, which might have been inspired by [SaraBrain](https://github.com/LunarFawn/SaraBrain). The port was largely done using [Pi Coding Agent](https://github.com/badlogic/pi-mono) and OpenAI GPT-5.4 - it's a work in progress and may not be as good as the original._
+_This is Rust re-implementation (not a direct fork) of the [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) project. The port was largely done using [Pi Coding Agent](https://github.com/badlogic/pi-mono) and OpenAI GPT-5.4 - it's a work in progress and may not be as good as the original._
+
+_Another interesting similar project is [SaraBrain](https://github.com/LunarFawn/SaraBrain) backed by 30+ years of research, papers, and experience._
 
 MemPalace is a local memory system for projects, conversations, and agent workflows. This Rust implementation stores everything in SQLite, supports hybrid retrieval, and exposes both a CLI and an MCP server.
 
